@@ -1,0 +1,12 @@
+app = "acme-medical-scribe-server"
+primary_region = "iad"
+
+[build]
+
+# No [http_service] — this is a worker process, not a web server.
+# It connects outbound to LiveKit Cloud via WebSocket.
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1

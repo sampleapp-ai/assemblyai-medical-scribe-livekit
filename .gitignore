@@ -1,0 +1,17 @@
+# Python
+server/.venv/
+__pycache__/
+*.pyc
+
+# Node
+client/node_modules/
+client/.next/
+client/next-env.d.ts
+client/*.tsbuildinfo
+
+# Env files with secrets
+server/.env
+client/.env.local
+
+# OS
+.DS_Store

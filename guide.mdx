@@ -1,0 +1,169 @@
+# Build an Ambient Medical Scribe with LiveKit and AssemblyAI Universal-3 Pro
+
+Build a listen-only ambient clinical documentation agent using LiveKit Agents SDK and AssemblyAI Universal-3 Pro streaming STT. The agent listens to a doctor-patient conversation, transcribes in real time, post-processes each finalized turn through AssemblyAI's LLM Gateway for medical terminology correction, and generates a SOAP note on demand. No TTS — this is a passive ambient scribe.
+
+<downloadandopenbuttons
+  downloadurl="/public/guardian/assemblyai/livekit-medical-scribe.zip"
+  themecolor="#10b981"
+/>
+
+### ❶ Install dependencies
+
+<codefocussection filepath="server/requirements.txt" filerange="1-4" title="Python dependencies" themeColor="#10b981" label="Server">
+
+Install the LiveKit Agents SDK with plugins for AssemblyAI (speech-to-text) and Silero (voice activity detection). Also install the noise cancellation plugin, `python-dotenv` for environment variables, and `httpx` for async HTTP calls to the AssemblyAI LLM Gateway.
+
+Unlike the voice agent, there is no TTS or LLM dependency — the scribe is listen-only and uses the LLM Gateway directly via HTTP for post-processing.
+
+```bash
+pip install "livekit-agents[assemblyai,silero]" livekit-plugins-noise-cancellation python-dotenv httpx
+```
+
+</codefocussection>
+
+### ❷ Configure API keys
+
+<codefocussection filepath="server/.env.example" filerange="1-5" title="Environment variables template" themeColor="#10b981" label="Server">
+
+Create a `.env` file with your API keys. You'll need an [AssemblyAI](https://www.assemblyai.com/) key (used for both STT and LLM Gateway — same key) and your [LiveKit Cloud](https://cloud.livekit.io/) project credentials. The `LLM_GATEWAY_MODEL` controls which model the LLM Gateway uses for medical editing and SOAP note generation.
+
+</codefocussection>
+
+### ❸ Import libraries and load environment
+
+<codefocussection filepath="server/medical_scribe.py" filerange="1-19" title="Import libraries and load environment" themeColor="#10b981" label="Server">
+
+Import the LiveKit Agents SDK with plugins for AssemblyAI STT, Silero VAD, and noise cancellation. Also import `httpx` for async LLM Gateway calls and standard library modules for JSON handling and timestamps. `load_dotenv()` pulls API keys from your `.env` file.
+
+Note: No OpenAI, Rime, or TTS imports — this agent only listens.
+
+</codefocussection>
+
+### ❹ Define medical keyterms
+
+<codefocussection filepath="server/medical_scribe.py" filerange="21-43" title="Define medical keyterms for recognition boost" themeColor="#10b981" label="Server">
+
+Define medical keyterms that Universal-3 Pro uses to boost recognition accuracy. These cover common conditions (hypertension, diabetes mellitus, coronary artery disease), medications with dosages (metformin 1000mg, lisinopril 10mg), clinical documentation sections (chief complaint, history of present illness, review of systems), examination terms (auscultation, palpation), and vital signs (hemoglobin A1c, blood pressure).
+
+U3P's `keyterms_prompt` appends these to its built-in default prompt, significantly improving transcription accuracy for domain-specific medical vocabulary.
+
+</codefocussection>
+
+### ❺ Configure LLM Gateway prompts
+
+<codefocussection filepath="server/medical_scribe.py" filerange="45-61" title="LLM Gateway configuration and system prompts" themeColor="#10b981" label="Server">
+
+The LLM Gateway serves two purposes in the medical scribe:
+
+**Medical editing prompt** — Applied to each finalized transcription turn. It corrects drug names, dosages, anatomy terms, and punctuation while preserving the speaker's original meaning. This catches errors like "met for men" → "metformin" or "echo card E-O gram" → "echocardiogram."
+
+**SOAP note prompt** — Applied at the end to generate a structured clinical note (Subjective, Objective, Assessment, Plan) from the full encounter transcript.
+
+Both use the same `https://llm-gateway.assemblyai.com/v1/chat/completions` endpoint authenticated with your AssemblyAI API key.
+
+</codefocussection>
+
+### ❻ Define the scribe agent
+
+<codefocussection filepath="server/medical_scribe.py" filerange="64-71" title="Medical scribe agent class" themeColor="#10b981" label="Server">
+
+The `MedicalScribe` class extends LiveKit's `Agent` base class. Its instructions tell the agent it's an ambient listener — it should never speak. This is the opposite of the voice agent pattern where the agent actively responds.
+
+</codefocussection>
+
+### ❼ Build LLM Gateway helpers
+
+<codefocussection filepath="server/medical_scribe.py" filerange="74-119" title="LLM Gateway helper functions" themeColor="#10b981" label="Server">
+
+Three helper functions handle all LLM Gateway communication:
+
+**`call_llm_gateway`** — Generic async function that posts to the LLM Gateway endpoint. Uses `httpx.AsyncClient` for non-blocking HTTP calls with a 60-second timeout. Falls back gracefully on errors.
+
+**`post_process_turn`** — Wraps `call_llm_gateway` with the medical editing prompt. Called on every finalized transcription turn.
+
+**`generate_soap_note`** — Assembles the full timestamped encounter transcript and sends it to the LLM Gateway with the SOAP note prompt. Uses a higher `max_tokens` (1500) since SOAP notes are longer than individual turn edits.
+
+</codefocussection>
+
+### ❽ Configure STT with conservative turn detection
+
+<codefocussection filepath="server/medical_scribe.py" filerange="122-138" title="Entrypoint — STT and session setup" themeColor="#10b981" label="Server">
+
+The entrypoint connects to the LiveKit room and configures the STT pipeline. Key differences from the voice agent:
+
+**Conservative turn detection** — `min_end_of_turn_silence_when_confident=800` and `max_turn_silence=3600`. Clinical conversations have long pauses (provider thinking, examining, reviewing charts), so the thresholds are much higher than the voice agent's aggressive 100ms/1200ms. This prevents premature turn endings during natural clinical pauses.
+
+**No LLM or TTS** — The `AgentSession` only includes STT and VAD. The scribe listens passively; the LLM Gateway is called directly via HTTP instead of through the LiveKit plugin pipeline.
+
+</codefocussection>
+
+### ❾ Collect transcripts with per-turn LLM editing
+
+<codefocussection filepath="server/medical_scribe.py" filerange="140-169" title="Transcript collection and per-turn medical editing" themeColor="#10b981" label="Server">
+
+When the STT finalizes a turn (`user_input_transcribed` event with `is_final=True`), the scribe:
+
+1. Calls `post_process_turn()` to fix medical terminology via the LLM Gateway
+2. Stores both the original and edited text in the encounter buffer with a timestamp
+3. Publishes the edited transcript back to the client via LiveKit's data channel
+
+The data channel message uses a `"transcript"` type so the client can display the corrected version alongside the raw real-time transcription.
+
+</codefocussection>
+
+### ❿ Handle SOAP note generation via data channel
+
+<codefocussection filepath="server/medical_scribe.py" filerange="171-212" title="SOAP note generation and session start" themeColor="#10b981" label="Server">
+
+The client communicates with the server agent through LiveKit's data channel:
+
+1. **Client sends** `{"type": "generate_soap"}` when the clinician clicks "Generate"
+2. **Server publishes** a status message while processing
+3. **Server calls** `generate_soap_note()` with the accumulated encounter buffer
+4. **Server publishes** the complete SOAP note back to the client
+
+The session starts with noise cancellation enabled on the room input — important for clinical environments. No `generate_reply()` is called since the agent never speaks.
+
+Run with `python medical_scribe.py dev` to start in development mode.
+
+</codefocussection>
+
+### ⓫ Next.js client — real-time encounter UI
+
+<codefocussection filepath="client/src/app/page.tsx" filerange="1-16" title="Client setup and LiveKit integration" themeColor="#10b981" label="Client">
+
+The Next.js client provides a two-panel clinical documentation interface:
+
+- **Left panel:** Real-time transcript from the local microphone via `useTrackTranscription`, with LLM-edited versions displayed below each line when they arrive from the server
+- **Right panel:** SOAP note — initially empty, populated when the clinician clicks "Generate"
+- **Header:** Recording indicator with encounter timer
+- **Footer:** Microphone controls and "End Encounter" button
+
+The client uses `useRoomContext` to listen for `DataReceived` events from the server agent, parsing JSON messages for edited transcripts, SOAP notes, and status updates. It publishes `{"type": "generate_soap"}` back to the server when the clinician requests a note.
+
+</codefocussection>
+
+### ⓬ Run the medical scribe
+
+**Start the server:**
+
+```bash
+python medical_scribe.py dev
+```
+
+**Start the client:**
+
+```bash
+cd client && npm install && npm run dev
+```
+
+Open `http://localhost:3000`, click **Start Encounter**, and begin a clinical conversation. The transcript appears in real time on the left panel. When you're ready, click **Generate** to produce a SOAP note from the encounter.
+
+### Hybrid approach: streaming + async
+
+Speaker diarization and PII redaction are not available in streaming mode. The recommended production workflow is:
+
+1. **During the visit:** Stream with the ambient scribe for real-time documentation
+2. **After the visit:** Process the full recording through AssemblyAI's async API for speaker-labeled, PII-redacted SOAP notes with diarization
+
+This gives clinicians immediate documentation during the encounter while producing a polished, compliant note afterward.

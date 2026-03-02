@@ -1,0 +1,4 @@
+livekit-agents[assemblyai,silero]
+livekit-plugins-noise-cancellation
+python-dotenv
+httpx
