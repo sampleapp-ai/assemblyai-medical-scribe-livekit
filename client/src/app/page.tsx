@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import {
   LiveKitRoom,
   DisconnectButton,
@@ -78,9 +78,10 @@ export default function Page() {
 
 function useEncounterTimer() {
   const [elapsed, setElapsed] = useState(0);
-  const startRef = useRef(Date.now());
+  const startRef = useRef<number>(0);
 
   useEffect(() => {
+    startRef.current = Date.now();
     const interval = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startRef.current) / 1000));
     }, 1000);
@@ -281,7 +282,28 @@ interface Segment {
 function TranscriptPanel({ rawSegments, partialTranscript }: { rawSegments: Segment[]; partialTranscript: string | null }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const entries = rawSegments.filter((seg) => seg.text.trim());
+  const entries = useMemo(() => {
+    const sorted = [...rawSegments]
+      .filter((s) => s.text.trim())
+      .sort((a, b) => a.firstReceivedTime - b.firstReceivedTime);
+
+    const result: Segment[] = [];
+    let pendingInterims: Segment[] = [];
+
+    for (const seg of sorted) {
+      if (seg.final) {
+        // Final segment replaces any preceding interim segments
+        pendingInterims = [];
+        result.push(seg);
+      } else {
+        pendingInterims.push(seg);
+      }
+    }
+
+    // Keep any trailing interims (currently streaming)
+    result.push(...pendingInterims);
+    return result;
+  }, [rawSegments]);
 
   useEffect(() => {
     if (scrollRef.current) {

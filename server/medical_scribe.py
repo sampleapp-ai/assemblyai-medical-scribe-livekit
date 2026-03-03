@@ -113,6 +113,7 @@ async def entrypoint(ctx: agents.JobContext):
     encounter_buffer: list[dict] = []
 
     stt_instance = assemblyai.STT(
+        mosdel="u3-rt-pro",
         min_end_of_turn_silence_when_confident=800,
         max_turn_silence=3600,
         keyterms_prompt=MEDICAL_KEYTERMS,

@@ -1,4 +1,4 @@
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, AgentDispatchClient } from "livekit-server-sdk";
 import { NextResponse } from "next/server";
 
 export async function POST() {
@@ -29,6 +29,10 @@ export async function POST() {
   });
 
   const token = await at.toJwt();
+
+  // Explicitly dispatch an agent to the room
+  const dispatch = new AgentDispatchClient(livekitUrl, apiKey, apiSecret);
+  await dispatch.createDispatch(roomName, "");
 
   return NextResponse.json(
     { token, serverUrl: livekitUrl },

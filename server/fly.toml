@@ -7,6 +7,6 @@ primary_region = "iad"
 # It connects outbound to LiveKit Cloud via WebSocket.
 
 [[vm]]
-  memory = "1gb"
+  memory = "2gb"
   cpu_kind = "shared"
-  cpus = 1
+  cpus = 2
