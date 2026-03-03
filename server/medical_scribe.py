@@ -16,7 +16,9 @@ from livekit.plugins import (
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("medical-scribe")
+logger.setLevel(logging.DEBUG)
 
 # ── Medical keyterms for recognition boost ────────────────────
 MEDICAL_KEYTERMS = [
@@ -126,13 +128,28 @@ async def entrypoint(ctx: agents.JobContext):
     # ── Collect raw transcription turns ─────────────────────────
     @session.on("user_input_transcribed")
     def on_transcription(ev):
+        label = "FINAL" if ev.is_final else "PARTIAL"
+        logger.info(f"[STT {label}] is_final={ev.is_final} transcript={ev.transcript[:120]!r}")
+
+        # Send partial transcripts to the client so the UI can display live text
+        if not ev.is_final:
+            asyncio.create_task(
+                ctx.room.local_participant.publish_data(
+                    json.dumps({
+                        "type": "partial_transcript",
+                        "text": ev.transcript,
+                    }).encode(),
+                    reliable=False,  # unreliable is fine for partials — lower latency
+                )
+            )
+
         if ev.is_final:
             entry = {
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
                 "text": ev.transcript,
             }
             encounter_buffer.append(entry)
-            logger.info(f"Turn collected: {ev.transcript[:80]}...")
+            logger.info(f"Turn collected ({len(encounter_buffer)} total): {ev.transcript[:80]}...")
 
     # ── Handle data messages from client (SOAP generation) ────
     @ctx.room.on("data_received")

@@ -105,16 +105,21 @@ function useAgentData() {
   const room = useRoomContext();
   const [soapNote, setSoapNote] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [partialTranscript, setPartialTranscript] = useState<string | null>(null);
 
   useEffect(() => {
     const handler = (payload: Uint8Array) => {
       try {
         const data = JSON.parse(new TextDecoder().decode(payload));
+        console.log("[DataChannel] received:", data.type, data);
         if (data.type === "soap_note") {
           setSoapNote(data.content);
           setStatus(null);
         } else if (data.type === "status") {
           setStatus(data.message);
+        } else if (data.type === "partial_transcript") {
+          console.log("[DataChannel] PARTIAL:", data.text);
+          setPartialTranscript(data.text);
         }
       } catch {
         // ignore malformed data
@@ -134,7 +139,10 @@ function useAgentData() {
     setStatus("Generating SOAP note...");
   }, [room]);
 
-  return { soapNote, status, requestSoapNote };
+  // Clear partial when a final segment arrives (called from outside)
+  const clearPartial = useCallback(() => setPartialTranscript(null), []);
+
+  return { soapNote, status, partialTranscript, clearPartial, requestSoapNote };
 }
 
 /* ================================================================
@@ -144,7 +152,7 @@ function useAgentData() {
 function MedicalScribeView() {
   const { localParticipant } = useLocalParticipant();
   const timer = useEncounterTimer();
-  const { soapNote, status, requestSoapNote } = useAgentData();
+  const { soapNote, status, partialTranscript, clearPartial, requestSoapNote } = useAgentData();
   const [phase, setPhase] = useState<"recording" | "review">("recording");
 
   // Get raw transcription from local mic (real-time display)
@@ -155,6 +163,23 @@ function MedicalScribeView() {
     ? { participant: localParticipant, publication: localMicTrack, source: Track.Source.Microphone }
     : undefined;
   const { segments: rawSegments } = useTrackTranscription(trackRef);
+
+  // Debug logging — check browser console to see how segments stream in
+  useEffect(() => {
+    console.log(
+      "[Transcription] rawSegments update:",
+      rawSegments.map((s) => ({
+        id: s.id,
+        final: s.final,
+        text: s.text.substring(0, 80),
+      }))
+    );
+    // Clear the data-channel partial when a new final segment arrives
+    const lastSeg = rawSegments[rawSegments.length - 1];
+    if (lastSeg?.final) {
+      clearPartial();
+    }
+  }, [rawSegments, clearPartial]);
 
   const endEncounter = useCallback(() => {
     localParticipant.setMicrophoneEnabled(false);
@@ -200,7 +225,7 @@ function MedicalScribeView() {
               {isRecording ? "Live Transcript" : "Encounter Transcript"}
             </h2>
           </div>
-          <TranscriptPanel rawSegments={rawSegments} />
+          <TranscriptPanel rawSegments={rawSegments} partialTranscript={partialTranscript} />
         </div>
 
         {/* SOAP note panel */}
@@ -253,7 +278,7 @@ interface Segment {
   final: boolean;
 }
 
-function TranscriptPanel({ rawSegments }: { rawSegments: Segment[] }) {
+function TranscriptPanel({ rawSegments, partialTranscript }: { rawSegments: Segment[]; partialTranscript: string | null }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const entries = rawSegments.filter((seg) => seg.text.trim());
@@ -319,12 +344,25 @@ function TranscriptPanel({ rawSegments }: { rawSegments: Segment[] }) {
             <span className="text-zinc-600 text-xs font-mono mt-0.5 shrink-0 w-14">
               {timestamp}
             </span>
-            <p className="text-sm text-zinc-200 leading-relaxed flex-1">
+            <p className={`text-sm leading-relaxed flex-1 ${seg.final ? "text-zinc-200" : "text-zinc-400 italic"}`}>
               {seg.text.trim()}
+              {!seg.final && <span className="text-zinc-600 text-xs ml-2">(partial)</span>}
             </p>
           </div>
         );
       })}
+      {/* Show live partial transcript from data channel */}
+      {partialTranscript && (
+        <div className="flex gap-3 opacity-60">
+          <span className="text-zinc-600 text-xs font-mono mt-0.5 shrink-0 w-14">
+            ...
+          </span>
+          <p className="text-sm text-emerald-400/70 leading-relaxed flex-1 italic">
+            {partialTranscript}
+            <span className="inline-block w-1.5 h-4 bg-emerald-400/50 ml-0.5 animate-pulse align-middle" />
+          </p>
+        </div>
+      )}
     </div>
   );
 }
