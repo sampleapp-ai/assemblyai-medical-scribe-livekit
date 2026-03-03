@@ -15,10 +15,12 @@ from livekit.plugins import (
     silero,
 )
 
-# Load shared .env from the medical-scribe root, then local overrides
-_shared_env = Path(__file__).resolve().parents[2] / ".env"
-load_dotenv(_shared_env)
-load_dotenv()  # local server/.env can override
+# Load shared .env from the medical-scribe root (when running locally), then local overrides
+_server_dir = Path(__file__).resolve().parent
+_shared_env = _server_dir.parent.parent / ".env"
+if _shared_env.exists():
+    load_dotenv(_shared_env)
+load_dotenv()  # local server/.env (or Docker env vars) can override
 
 logger = logging.getLogger("medical-scribe")
 
