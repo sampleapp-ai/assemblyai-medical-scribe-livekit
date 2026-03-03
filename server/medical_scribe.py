@@ -68,13 +68,14 @@ class MedicalScribe(Agent):
             )
         )
         self.encounter_buffer: list[dict] = []
+        self.room: rtc.Room | None = None
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
         return  # listen-only scribe — suppress auto-reply
 
     def _publish(self, data: dict, *, reliable: bool = True):
         """Fire-and-forget publish a JSON message to the room."""
-        room = self.session.room
+        room = self.room
         asyncio.create_task(
             room.local_participant.publish_data(
                 json.dumps(data).encode(), reliable=reliable,
@@ -161,6 +162,7 @@ async def entrypoint(ctx: agents.JobContext):
     await ctx.connect()
 
     scribe = MedicalScribe()
+    scribe.room = ctx.room
 
     session = AgentSession(
         stt=assemblyai.STT(
