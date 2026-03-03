@@ -3,6 +3,7 @@ import json
 import os
 import asyncio
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
@@ -14,11 +15,12 @@ from livekit.plugins import (
     silero,
 )
 
-load_dotenv()
+# Load shared .env from the medical-scribe root, then local overrides
+_shared_env = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(_shared_env)
+load_dotenv()  # local server/.env can override
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("medical-scribe")
-logger.setLevel(logging.DEBUG)
 
 # ── Medical keyterms for recognition boost ────────────────────
 MEDICAL_KEYTERMS = [
@@ -63,20 +65,79 @@ class MedicalScribe(Agent):
                 "encounter and collect all transcript turns. Do not speak."
             )
         )
+        self.encounter_buffer: list[dict] = []
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        # Suppress auto-reply — this is a listen-only scribe
-        return
+        return  # listen-only scribe — suppress auto-reply
+
+    def _publish(self, data: dict, *, reliable: bool = True):
+        """Fire-and-forget publish a JSON message to the room."""
+        room = self.session.room
+        asyncio.create_task(
+            room.local_participant.publish_data(
+                json.dumps(data).encode(), reliable=reliable,
+            )
+        )
+
+    def on_transcription(self, ev):
+        """Handle both partial and final transcription events."""
+        if not ev.is_final:
+            self._publish(
+                {"type": "partial_transcript", "text": ev.transcript},
+                reliable=False,
+            )
+            return
+
+        entry = {
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "text": ev.transcript,
+        }
+        self.encounter_buffer.append(entry)
+        logger.info(f"Turn collected ({len(self.encounter_buffer)} total)")
+
+    def on_data_received(self, packet: rtc.DataPacket):
+        """Handle data messages from client (e.g. SOAP generation requests)."""
+        try:
+            message = json.loads(packet.data.decode())
+            if message.get("type") == "generate_soap":
+                asyncio.create_task(self._handle_soap_request())
+        except Exception as e:
+            logger.error(f"Error processing data message: {e}")
+
+    async def _handle_soap_request(self):
+        if not self.encounter_buffer:
+            self._publish({
+                "type": "soap_note",
+                "content": "No transcript data available. Please ensure the encounter has started.",
+            })
+            return
+
+        self._publish({"type": "status", "message": "Generating SOAP note..."})
+
+        soap = await self._generate_soap_note()
+        self._publish({"type": "soap_note", "content": soap})
+        logger.info("SOAP note generated and sent to client")
+
+    async def _generate_soap_note(self) -> str:
+        transcript_text = "\n".join(
+            f"[{e['timestamp']}] {e['text']}" for e in self.encounter_buffer
+        )
+        result = await _call_llm_gateway(
+            SOAP_NOTE_SYSTEM_PROMPT,
+            f"Create a SOAP note from this clinical encounter:\n\n{transcript_text}",
+            max_tokens=1500,
+        )
+        return result or "Unable to generate SOAP note. Please try again."
 
 
-async def call_llm_gateway(system_prompt: str, user_content: str, max_tokens: int = 800) -> str | None:
+async def _call_llm_gateway(system_prompt: str, user_content: str, max_tokens: int = 800) -> str | None:
     """Call AssemblyAI LLM Gateway for medical text processing."""
     headers = {
         "Authorization": os.getenv("ASSEMBLYAI_API_KEY", ""),
         "Content-Type": "application/json",
     }
     payload = {
-        "model": os.getenv("LLM_GATEWAY_MODEL", "claude-3-haiku-20240307"),
+        "model": os.getenv("LLM_GATEWAY_MODEL", "claude-haiku-4-5-20251001"),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
@@ -94,102 +155,27 @@ async def call_llm_gateway(system_prompt: str, user_content: str, max_tokens: in
         return None
 
 
-async def generate_soap_note(encounter_buffer: list[dict]) -> str:
-    """Generate a SOAP note from the full encounter transcript."""
-    transcript_text = "\n".join(
-        f"[{entry['timestamp']}] {entry['text']}" for entry in encounter_buffer
-    )
-    result = await call_llm_gateway(
-        SOAP_NOTE_SYSTEM_PROMPT,
-        f"Create a SOAP note from this clinical encounter:\n\n{transcript_text}",
-        max_tokens=1500,
-    )
-    return result or "Unable to generate SOAP note. Please try again."
-
-
 async def entrypoint(ctx: agents.JobContext):
     await ctx.connect()
 
-    encounter_buffer: list[dict] = []
-
-    stt_instance = assemblyai.STT(
-        mosdel="u3-rt-pro",
-        min_end_of_turn_silence_when_confident=800,
-        max_turn_silence=3600,
-        keyterms_prompt=MEDICAL_KEYTERMS,
-    )
+    scribe = MedicalScribe()
 
     session = AgentSession(
-        stt=stt_instance,
+        stt=assemblyai.STT(
+            min_end_of_turn_silence_when_confident=800,
+            max_turn_silence=3600,
+            keyterms_prompt=MEDICAL_KEYTERMS,
+        ),
         vad=silero.VAD.load(),
         turn_detection="stt",
-        # No LLM or TTS — this is a listen-only scribe
     )
 
-    # ── Collect raw transcription turns ─────────────────────────
-    @session.on("user_input_transcribed")
-    def on_transcription(ev):
-        label = "FINAL" if ev.is_final else "PARTIAL"
-        logger.info(f"[STT {label}] is_final={ev.is_final} transcript={ev.transcript[:120]!r}")
-
-        # Send partial transcripts to the client so the UI can display live text
-        if not ev.is_final:
-            asyncio.create_task(
-                ctx.room.local_participant.publish_data(
-                    json.dumps({
-                        "type": "partial_transcript",
-                        "text": ev.transcript,
-                    }).encode(),
-                    reliable=False,  # unreliable is fine for partials — lower latency
-                )
-            )
-
-        if ev.is_final:
-            entry = {
-                "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "text": ev.transcript,
-            }
-            encounter_buffer.append(entry)
-            logger.info(f"Turn collected ({len(encounter_buffer)} total): {ev.transcript[:80]}...")
-
-    # ── Handle data messages from client (SOAP generation) ────
-    @ctx.room.on("data_received")
-    def on_data_received(packet: rtc.DataPacket):
-        try:
-            message = json.loads(packet.data.decode())
-            if message.get("type") == "generate_soap":
-                asyncio.create_task(_handle_soap_request())
-        except Exception as e:
-            logger.error(f"Error processing data message: {e}")
-
-    async def _handle_soap_request():
-        if not encounter_buffer:
-            await ctx.room.local_participant.publish_data(
-                json.dumps({
-                    "type": "soap_note",
-                    "content": "No transcript data available. Please ensure the encounter has started.",
-                }).encode(),
-                reliable=True,
-            )
-            return
-
-        # Notify client that generation is in progress
-        await ctx.room.local_participant.publish_data(
-            json.dumps({"type": "status", "message": "Generating SOAP note..."}).encode(),
-            reliable=True,
-        )
-
-        soap = await generate_soap_note(encounter_buffer)
-
-        await ctx.room.local_participant.publish_data(
-            json.dumps({"type": "soap_note", "content": soap}).encode(),
-            reliable=True,
-        )
-        logger.info("SOAP note generated and sent to client")
+    session.on("user_input_transcribed", scribe.on_transcription)
+    ctx.room.on("data_received", scribe.on_data_received)
 
     await session.start(
         room=ctx.room,
-        agent=MedicalScribe(),
+        agent=scribe,
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVC(),
             close_on_disconnect=False,

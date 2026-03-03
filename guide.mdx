@@ -29,15 +29,15 @@ Create a `.env` file with your API keys. You'll need an [AssemblyAI](https://www
 
 ### ❸ Import libraries and load environment
 
-<codefocussection filepath="server/medical_scribe.py" filerange="1-17" title="Import libraries and load environment" themeColor="#10b981" label="Server">
+<codefocussection filepath="server/medical_scribe.py" filerange="1-25" title="Import libraries and load environment" themeColor="#10b981" label="Server">
 
-Import the LiveKit Agents SDK with plugins for AssemblyAI STT, Silero VAD, and noise cancellation. Also import `httpx` for async LLM Gateway calls and standard library modules for JSON handling, timestamps, and async task creation. `load_dotenv()` pulls API keys from your `.env` file. No TTS or LLM plugin imports — this agent only listens.
+Import the LiveKit Agents SDK with plugins for AssemblyAI STT, Silero VAD, and noise cancellation. Also import `httpx` for async LLM Gateway calls and standard library modules for JSON handling, timestamps, async task creation, and path resolution. Environment variables are loaded in two layers — first from a shared `.env` at the project root, then from a local `server/.env` that can override. Logging is configured at DEBUG level for detailed STT diagnostics. No TTS or LLM plugin imports — this agent only listens.
 
 </codefocussection>
 
 ### ❹ Define medical keyterms
 
-<codefocussection filepath="server/medical_scribe.py" filerange="21-43" title="Medical keyterms for recognition boost" themeColor="#10b981" label="Server">
+<codefocussection filepath="server/medical_scribe.py" filerange="27-49" title="Medical keyterms for recognition boost" themeColor="#10b981" label="Server">
 
 Define medical keyterms that Universal-3 Pro uses to boost recognition accuracy. These cover common conditions (hypertension, diabetes mellitus), medications with dosages (metformin 1000mg, lisinopril 10mg), clinical documentation sections (chief complaint, history of present illness), examination terms (auscultation, palpation), and vital signs (hemoglobin A1c, blood pressure). U3P's `keyterms_prompt` appends these to its built-in default prompt, improving transcription of domain-specific medical vocabulary.
 
@@ -45,15 +45,15 @@ Define medical keyterms that Universal-3 Pro uses to boost recognition accuracy.
 
 ### ❺ Configure SOAP note prompt and scribe agent
 
-<codefocussection filepath="server/medical_scribe.py" filerange="45-67" title="SOAP note prompt and listen-only agent" themeColor="#10b981" label="Server">
+<codefocussection filepath="server/medical_scribe.py" filerange="51-73" title="SOAP note prompt and listen-only agent" themeColor="#10b981" label="Server">
 
-Define the SOAP note system prompt that instructs the LLM to produce a structured clinical note (Subjective, Objective, Assessment, Plan) with bullet points and medication dosages. The `MedicalScribe` class extends LiveKit's `Agent` base class with instructions to listen silently. The `on_user_turn_completed` override suppresses the default auto-reply behavior, ensuring the scribe never speaks during the encounter.
+Define the LLM Gateway endpoint URL and the SOAP note system prompt that instructs the LLM to produce a structured clinical note (Subjective, Objective, Assessment, Plan) with bullet points and medication dosages. The `MedicalScribe` class extends LiveKit's `Agent` base class with instructions to listen silently. The `on_user_turn_completed` override suppresses the default auto-reply behavior, ensuring the scribe never speaks during the encounter.
 
 </codefocussection>
 
 ### ❻ Build the LLM Gateway helper
 
-<codefocussection filepath="server/medical_scribe.py" filerange="70-105" title="LLM Gateway helper functions" themeColor="#10b981" label="Server">
+<codefocussection filepath="server/medical_scribe.py" filerange="76-111" title="LLM Gateway helper functions" themeColor="#10b981" label="Server">
 
 Build async helper functions for AssemblyAI's LLM Gateway (`https://llm-gateway.assemblyai.com/v1/chat/completions`). The generic `call_llm_gateway` function handles authentication with your AssemblyAI API key and non-blocking HTTP calls via `httpx`. The `generate_soap_note` wrapper assembles the full timestamped encounter transcript and sends it to the gateway with the SOAP note prompt, using a higher `max_tokens` (1500) for longer clinical documents.
 
@@ -61,29 +61,45 @@ Build async helper functions for AssemblyAI's LLM Gateway (`https://llm-gateway.
 
 ### ❼ Configure STT with conservative turn detection
 
-<codefocussection filepath="server/medical_scribe.py" filerange="108-124" title="Entrypoint — STT and session setup" themeColor="#10b981" label="Server">
+<codefocussection filepath="server/medical_scribe.py" filerange="114-130" title="Entrypoint — STT and session setup" themeColor="#10b981" label="Server">
 
-Configure AssemblyAI U3P with conservative turn detection — `min_end_of_turn_silence_when_confident=800` and `max_turn_silence=3600`. Clinical conversations have long pauses (provider thinking, examining, reviewing charts), so these thresholds are much higher than the voice agent's aggressive 100ms/1200ms. The `AgentSession` only includes STT and VAD — no LLM or TTS since the scribe listens passively.
+Configure AssemblyAI U3P with conservative turn detection — `min_end_of_turn_silence_when_confident=800` and `max_turn_silence=3600`. Clinical conversations have long pauses (provider thinking, examining, reviewing charts), so these thresholds are much higher than the voice agent's aggressive 100ms/1200ms. The `AgentSession` only includes STT and VAD — no LLM or TTS since the scribe listens passively. Setting `turn_detection="stt"` tells the session to use AssemblyAI's built-in endpoint detection rather than the VAD model.
 
 </codefocussection>
 
 ### ❽ Collect transcripts and handle SOAP generation
 
-<codefocussection filepath="server/medical_scribe.py" filerange="126-170" title="Transcript collection and SOAP note generation via data channel" themeColor="#10b981" label="Server">
+<codefocussection filepath="server/medical_scribe.py" filerange="132-191" title="Transcript collection and SOAP note generation via data channel" themeColor="#10b981" label="Server">
 
-When the STT finalizes a turn, the raw transcript is stored in the encounter buffer with a timestamp. The client communicates SOAP note requests through LiveKit's data channel — sending `{"type": "generate_soap"}` triggers the server to call `generate_soap_note()` with the full encounter buffer and publish the result back to the client.
+The `user_input_transcribed` event fires for both partial and final STT results. Partial transcripts are immediately published to the client via LiveKit's data channel (`reliable=False` for lower latency), so the UI can show live in-progress text. When the STT finalizes a turn, the raw transcript is stored in the encounter buffer with a timestamp. For SOAP generation, the client sends `{"type": "generate_soap"}` through the data channel, which triggers the server to call `generate_soap_note()` with the full encounter buffer and publish the result back.
 
 </codefocussection>
 
 ### ❾ Start the session and run the agent
 
-<codefocussection filepath="server/medical_scribe.py" filerange="172-183" title="Start session with noise cancellation" themeColor="#10b981" label="Server">
+<codefocussection filepath="server/medical_scribe.py" filerange="193-204" title="Start session with noise cancellation" themeColor="#10b981" label="Server">
 
 Start the agent session with noise cancellation enabled on the room input. `close_on_disconnect=False` keeps the agent session alive during the review phase so SOAP note generation can still complete after the clinician mutes their mic. The `if __name__ == "__main__"` block uses LiveKit's built-in CLI runner.
 
 </codefocussection>
 
-### ❿ Build the real-time encounter UI
+### ❿ Create the room and dispatch the agent
+
+<codefocussection filepath="client/src/app/api/token/route.ts" filerange="1-45" title="Token endpoint — room creation with agent dispatch" themeColor="#10b981" label="Client">
+
+The Next.js API route handles room creation and token generation in a single request. Instead of using `AgentDispatchClient` separately, `RoomServiceClient.createRoom` combines room creation with agent dispatch — the `agents: [{ agentName: "" }]` config tells LiveKit to start the scribe agent as soon as the room exists. This ensures the agent begins booting before the client even receives its token, minimizing the gap between the clinician joining and the agent being ready to transcribe.
+
+</codefocussection>
+
+### ⓫ Wait for the agent before recording
+
+<codefocussection filepath="client/src/app/page.tsx" filerange="100-130" title="Agent readiness hook" themeColor="#10b981" label="Client">
+
+Even though the server dispatches the agent during room creation, there's no guarantee it's fully connected when the client joins — the agent still needs to boot, load the VAD model, and establish the STT websocket. The `useAgentReady` hook solves this by listening for `RoomEvent.ParticipantConnected` and checking `participant.kind === ParticipantKind.AGENT`. It also checks `room.remoteParticipants` on mount in case the agent joined before the component rendered. Until the agent is confirmed present, `MedicalScribeView` shows a "Connecting to scribe agent..." spinner instead of the recording UI — preventing the clinician from speaking before the scribe is actually listening.
+
+</codefocussection>
+
+### ⓬ Build the real-time encounter UI
 
 <codefocussection filepath="client/src/app/page.tsx" filerange="1-11" title="Next.js client with LiveKit integration" themeColor="#10b981" label="Client">
 
@@ -91,7 +107,7 @@ The Next.js client provides a two-panel encounter interface. The left panel show
 
 </codefocussection>
 
-### ⓫ Run the medical scribe
+### ⓭ Run the medical scribe
 
 **Start the server:**
 

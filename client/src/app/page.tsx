@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import {
   LiveKitRoom,
   DisconnectButton,
   useTrackTranscription,
   useLocalParticipant,
 } from "@livekit/components-react";
-import { Track, RoomEvent } from "livekit-client";
+import { Track, RoomEvent, ParticipantKind } from "livekit-client";
 import { useRoomContext } from "@livekit/components-react";
 
 /* ================================================================
@@ -78,10 +78,9 @@ export default function Page() {
 
 function useEncounterTimer() {
   const [elapsed, setElapsed] = useState(0);
-  const startRef = useRef<number>(0);
+  const startRef = useRef(Date.now());
 
   useEffect(() => {
-    startRef.current = Date.now();
     const interval = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startRef.current) / 1000));
     }, 1000);
@@ -96,6 +95,38 @@ function useEncounterTimer() {
     : `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 
   return formatted;
+}
+
+/* ================================================================
+   Agent readiness hook — wait for the scribe agent to join the room
+   ================================================================ */
+
+function useAgentReady() {
+  const room = useRoomContext();
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    // Check if agent is already in the room (e.g. joined before this component mounted)
+    for (const p of room.remoteParticipants.values()) {
+      if (p.kind === ParticipantKind.AGENT) {
+        console.log("[Agent] already in room:", p.identity);
+        setReady(true);
+        return;
+      }
+    }
+
+    const onParticipantConnected = (participant: import("livekit-client").RemoteParticipant) => {
+      if (participant.kind === ParticipantKind.AGENT) {
+        console.log("[Agent] joined room:", participant.identity);
+        setReady(true);
+      }
+    };
+
+    room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
+    return () => { room.off(RoomEvent.ParticipantConnected, onParticipantConnected); };
+  }, [room]);
+
+  return ready;
 }
 
 /* ================================================================
@@ -151,6 +182,7 @@ function useAgentData() {
    ================================================================ */
 
 function MedicalScribeView() {
+  const agentReady = useAgentReady();
   const { localParticipant } = useLocalParticipant();
   const timer = useEncounterTimer();
   const { soapNote, status, partialTranscript, clearPartial, requestSoapNote } = useAgentData();
@@ -188,6 +220,15 @@ function MedicalScribeView() {
   }, [localParticipant]);
 
   const isRecording = phase === "recording";
+
+  if (!agentReady) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen gap-4">
+        <div className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+        <p className="text-zinc-400 text-sm">Connecting to scribe agent...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-screen">
@@ -282,28 +323,7 @@ interface Segment {
 function TranscriptPanel({ rawSegments, partialTranscript }: { rawSegments: Segment[]; partialTranscript: string | null }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const entries = useMemo(() => {
-    const sorted = [...rawSegments]
-      .filter((s) => s.text.trim())
-      .sort((a, b) => a.firstReceivedTime - b.firstReceivedTime);
-
-    const result: Segment[] = [];
-    let pendingInterims: Segment[] = [];
-
-    for (const seg of sorted) {
-      if (seg.final) {
-        // Final segment replaces any preceding interim segments
-        pendingInterims = [];
-        result.push(seg);
-      } else {
-        pendingInterims.push(seg);
-      }
-    }
-
-    // Keep any trailing interims (currently streaming)
-    result.push(...pendingInterims);
-    return result;
-  }, [rawSegments]);
+  const entries = rawSegments.filter((seg) => seg.text.trim());
 
   useEffect(() => {
     if (scrollRef.current) {

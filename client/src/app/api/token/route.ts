@@ -1,4 +1,5 @@
-import { AccessToken, AgentDispatchClient } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
+import { RoomAgentDispatch } from "@livekit/protocol";
 import { NextResponse } from "next/server";
 
 export async function POST() {
@@ -16,6 +17,13 @@ export async function POST() {
   const roomName = `medical-scribe-room-${Math.random().toString(36).slice(2, 8)}`;
   const participantName = `clinician-${Math.random().toString(36).slice(2, 8)}`;
 
+  // Create the room with an agent dispatch so the scribe agent joins automatically
+  const roomService = new RoomServiceClient(livekitUrl, apiKey, apiSecret);
+  await roomService.createRoom({
+    name: roomName,
+    agents: [new RoomAgentDispatch({ agentName: "" })],
+  });
+
   const at = new AccessToken(apiKey, apiSecret, {
     identity: participantName,
     ttl: "60m",
@@ -29,10 +37,6 @@ export async function POST() {
   });
 
   const token = await at.toJwt();
-
-  // Explicitly dispatch an agent to the room
-  const dispatch = new AgentDispatchClient(livekitUrl, apiKey, apiSecret);
-  await dispatch.createDispatch(roomName, "");
 
   return NextResponse.json(
     { token, serverUrl: livekitUrl },
